@@ -1,0 +1,13 @@
+{
+  "train_mse": 4.0051,
+  "train_rmse": 2.0013,
+  "train_mae": 1.3687,
+  "test_mse": 24.8763,
+  "test_rmse": 4.9876,
+  "test_mae": 4.0868,
+  "keras_final_loss": 0.000067,
+  "keras_final_val_loss": 0.000445,
+  "epochs": 50,
+  "look_back": 60,
+  "ticker": "AAPL"
+}

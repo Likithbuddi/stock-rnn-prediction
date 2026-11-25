@@ -1,168 +1,145 @@
-import streamlit as st
+import json
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
+import streamlit as st
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow import keras
-from tensorflow.keras import layers
-import math
+import joblib
 
-st.set_page_config(page_title="Stock Price Predictor - SimpleRNN", layout="wide")
+st.set_page_config(page_title="Stock Predictor | Trained SimpleRNN", layout="wide")
 
-st.title("📈 SimpleRNN Stock Close‑Price Predictor")
+st.title("📈 Next‑Day Close Price Predictor")
 st.markdown(
-    "Predict the next day's closing price using a simple Recurrent Neural Network "
-    "trained on historical Yahoo Finance data. Adjust the parameters in the sidebar "
-    "and see the model's performance in real time."
+    "This dashboard uses a **pre‑trained SimpleRNN** (50 epochs) and its saved scaler "
+    "to predict the next trading day's closing price. No retraining happens here – "
+    "the model weights from `simple_rnn_model.keras` are loaded and reused."
 )
 
 # -------------------------------------------------------------------------#
-#  Sidebar user‑input panel
+#  Load trained artifacts (only once)
 # -------------------------------------------------------------------------#
-st.sidebar.header("Input Parameters")
+@st.cache_resource
+def load_artifacts():
+    model = keras.load_model("simple_rnn_model.keras")
+    scaler = joblib.load("scaler.save")
+    with open("metrics.json", "r") as f:
+        metrics = json.load(f)
+    return model, scaler, metrics
 
-ticker = st.sidebar.text_input("Stock ticker", value="AAPL").upper()
-start_date = st.sidebar.date_input("Start date", value=pd.to_datetime("2015-01-01"))
-end_date = st.sidebar.date_input("End date", value=pd.to_datetime("2024-12-31"))
-look_back = st.sidebar.slider("Look‑back days (sequence length)", 10, 120, 60)
-epochs = st.sidebar.slider("Training epochs", 1, 50, 20)
-batch_size = st.sidebar.slider("Batch size", 16, 256, 32)
 
-# -------------------------------------------------------------------------#
-#  Helper functions (mirrored from the standalone script)
-# -------------------------------------------------------------------------#
-@st.cache_data(show_spinner="Downloading data...")
-def download_data(ticker: str, start: str, end: str) -> pd.DataFrame:
+model, scaler, metrics = load_artifacts()
+
+# Download full historical data (cached) for the trained ticker
+@st.cache_data(show_spinner="Fetching historical prices...")
+def load_data(ticker, start, end):
     df = yf.download(ticker, start=start, end=end, progress=False)
     if df.empty:
-        raise ValueError("No data downloaded. Check ticker symbol and date range.")
-    df = df[["Close"]].reset_index()
-    return df
+        raise ValueError("No data downloaded. Check ticker and date range.")
+    return df[["Close"]].reset_index()
 
 
-def create_sequences(data: np.ndarray, look_back: int):
-    X, y = [], []
-    for i in range(look_back, len(data)):
-        X.append(data[i - look_back : i, 0])
-        y.append(data[i, 0])
-    return np.array(X), np.array(y)
+DATA_START = "2015-01-01"
+DATA_END = "2024-12-31"
+df = load_data(metrics["ticker"], DATA_START, DATA_END)
 
-
-def build_model(input_shape):
-    model = keras.Sequential(
-        [
-            layers.SimpleRNN(50, return_sequences=False, input_shape=input_shape),
-            layers.Dense(1),
-        ]
-    )
-    model.compile(optimizer="adam", loss="mean_squared_error")
-    return model
-
+LOOK_BACK = metrics["look_back"]
 
 # -------------------------------------------------------------------------#
-#  Main workflow
+#  Sidebar – user input panel
 # -------------------------------------------------------------------------#
-if st.sidebar.button("Run Prediction"):
-    try:
-        with st.spinner("Downloading data..."):
-            df = download_data(ticker, str(start_date), str(end_date))
+st.sidebar.header("Prediction Input Panel")
+st.sidebar.write(f"**Trained ticker:** `{metrics['ticker']}`")
+st.sidebar.write(f"**Look‑back window:** {LOOK_BACK} days")
 
-        # Scale
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        close_vals = df["Close"].values.reshape(-1, 1)
-        scaled = scaler.fit_transform(close_vals).flatten()
+min_date = df["Date"].min().date()
+max_date = df["Date"].max().date()
 
-        # Sequences
-        X, y = create_sequences(scaled, look_back)
-        if len(X) == 0:
-            st.error("Not enough data for the chosen look‑back. Reduce look‑back or extend the date range.")
-            st.stop()
-
-        # Train / test split (80/20)
-        split_idx = int(0.8 * len(X))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
-
-        X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-        X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
-
-        # Build & train
-        model = build_model(input_shape=(look_back, 1))
-
-        with st.spinner("Training model..."):
-            history = model.fit(
-                X_train,
-                y_train,
-                epochs=epochs,
-                batch_size=batch_size,
-                validation_data=(X_test, y_test),
-                verbose=0,
-            )
-
-        # Predict
-        train_pred_scaled = model.predict(X_train, verbose=0)
-        test_pred_scaled = model.predict(X_test, verbose=0)
-
-        train_pred = scaler.inverse_transform(train_pred_scaled).flatten()
-        test_pred = scaler.inverse_transform(test_pred_scaled).flatten()
-        y_train_orig = scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
-        y_test_orig = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-
-        # Metrics
-        train_rmse = np.sqrt(np.mean((train_pred - y_train_orig) ** 2))
-        test_rmse = np.sqrt(np.mean((test_pred - y_test_orig) ** 2))
-        train_mae = np.mean(np.abs(train_pred - y_train_orig))
-        test_mae = np.mean(np.abs(test_pred - y_test_orig))
-
-        # ------------------------------------------------------------------
-        # Display results
-        # ------------------------------------------------------------------
-        st.success("Prediction completed!")
-
-        # Metric cards
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Train RMSE", f"{train_rmse:.2f}")
-        col2.metric("Test  RMSE", f"{test_rmse:.2f}")
-        col3.metric("Train MAE",  f"{train_mae:.2f}")
-        col4.metric("Test  MAE",  f"{test_mae:.2f}")
-
-        # Actual vs Predicted plot
-        st.subheader("Actual vs Predicted Closing Price")
-        fig, ax = plt.subplots(figsize=(10, 5))
-
-        # Align x‑axis with original dates for visual reference
-        train_dates = df["Date"].values[look_back : look_back + len(train_pred)]
-        test_dates = df["Date"].values[look_back + split_idx : look_back + split_idx + len(test_pred)]
-
-        ax.plot(train_dates, y_train_orig, label="Train Actual", color="steelblue", alpha=0.6)
-        ax.plot(train_dates, train_pred, label="Train Predicted", color="orange", alpha=0.6)
-        ax.plot(test_dates, y_test_orig, label="Test Actual", color="lightblue", alpha=0.6)
-        ax.plot(test_dates, test_pred, label="Test Predicted", color="salmon", alpha=0.6)
-
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Close Price (USD)")
-        ax.set_title(f"{ticker} – Actual vs Predicted (RMSE: {test_rmse:.2f}, MAE: {test_mae:.2f})")
-        ax.legend()
-        ax.grid(alpha=0.3)
-        plt.tight_layout()
-        st.pyplot(fig)
-
-        # Optionally show the underlying data table
-        if st.checkbox("Show raw data preview"):
-            st.dataframe(df.tail(10))
-
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
-        st.info("Please check the ticker symbol, date range, and try again.")
-else:
-    st.info("Adjust the sidebar parameters and click **Run Prediction** to start.")
-
-
-# -------------------------------------------------------------------------#
-#  Footer
-# -------------------------------------------------------------------------#
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    "Built with Streamlit • TensorFlow/Keras • Yahoo Finance data • 2026"
+ref_date = st.sidebar.date_input(
+    "Reference date (last known trading day)",
+    value=max_date,
+    min_value=min_date,
+    max_value=max_date,
 )
+
+predict_btn = st.sidebar.button("Predict Next Day")
+
+# -------------------------------------------------------------------------#
+#  Main dashboard – training metrics
+# -------------------------------------------------------------------------#
+st.subheader("Model Performance (from 50‑epoch training)")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Train RMSE", f"{metrics['train_rmse']:.4f}")
+c2.metric("Test  RMSE", f"{metrics['test_rmse']:.4f}")
+c3.metric("Train MAE",  f"{metrics['train_mae']:.4f}")
+c4.metric("Test  MAE",  f"{metrics['test_mae']:.4f}")
+
+col5, col6 = st.columns(2)
+col5.metric("Train MSE", f"{metrics['train_mse']:.4f}")
+col6.metric("Test  MSE", f"{metrics['test_mse']:.4f}")
+
+st.caption(
+    f"Keras final scaled loss (MSE): {metrics['keras_final_loss']:.6f} | "
+    f"Validation loss: {metrics['keras_final_val_loss']:.6f} | "
+    f"Epochs: {metrics['epochs']} | Look‑back: {LOOK_BACK}"
+)
+
+# -------------------------------------------------------------------------#
+#  Prediction logic using saved weights
+# -------------------------------------------------------------------------#
+if predict_btn:
+    with st.spinner("Making prediction with loaded model weights..."):
+        # Find rows up to and including the chosen reference date
+        mask = pd.to_datetime(df["Date"]).dt.date <= ref_date
+        sub = df.loc[mask]
+        if len(sub) < LOOK_BACK:
+            st.error(f"Need at least {LOOK_BACK} days of history before {ref_date}. Choose a later date.")
+        else:
+            window = sub["Close"].values[-LOOK_BACK:].reshape(-1, 1)
+            scaled_window = scaler.transform(window)
+            X = scaled_window.reshape(1, LOOK_BACK, 1)
+            pred_scaled = model.predict(X, verbose=0)
+            pred_price = scaler.inverse_transform(pred_scaled)[0][0]
+
+            # Actual next-day close (if available) for comparison
+            next_rows = df.loc[pd.to_datetime(df["Date"]).dt.date > ref_date]
+            if not next_rows.empty:
+                actual_next = float(next_rows.iloc[0]["Close"])
+                err = abs(pred_price - actual_next)
+                st.success(
+                    f"Predicted next close after **{ref_date}**: **${pred_price:.2f}**\n\n"
+                    f"Actual next close: **${actual_next:.2f}**  |  Absolute error: **${err:.2f}**"
+                )
+            else:
+                st.success(f"Predicted next close after **{ref_date}**: **${pred_price:.2f}**")
+
+            # Plot recent history + prediction
+            fig, ax = plt.subplots(figsize=(10, 5))
+            recent = sub.tail(60)
+            ax.plot(pd.to_datetime(recent["Date"]), recent["Close"], label="Historical Close", color="steelblue")
+            next_date = pd.Timestamp(ref_date) + pd.Timedelta(days=1)
+            ax.scatter([next_date], [pred_price], color="crimson", s=80,
+                       label=f"Predicted ${pred_price:.2f}", zorder=5)
+            if not next_rows.empty:
+                ax.scatter([pd.to_datetime(next_rows.iloc[0]["Date"])], [actual_next],
+                           color="green", s=80, label=f"Actual ${actual_next:.2f}", zorder=5)
+            ax.set_title(f"{metrics['ticker']} – Next‑Day Prediction using Saved SimpleRNN Weights")
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Close Price (USD)")
+            ax.legend()
+            ax.grid(alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig)
+else:
+    st.info("Select a reference date in the sidebar and click **Predict Next Day**.")
+
+# -------------------------------------------------------------------------#
+#  Optional raw data preview
+# -------------------------------------------------------------------------#
+if st.checkbox("Show historical data preview"):
+    st.dataframe(df.tail(15))
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Pre‑trained model weights • Streamlit dashboard • Yahoo Finance data")

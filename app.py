@@ -6,7 +6,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow import keras
+from tensorflow.keras.models import load_model
 import joblib
 
 st.set_page_config(page_title="Stock Predictor | Trained SimpleRNN", layout="wide")
@@ -23,7 +23,7 @@ st.markdown(
 # -------------------------------------------------------------------------#
 @st.cache_resource
 def load_artifacts():
-    model = keras.load_model("simple_rnn_model.keras")
+    model = load_model("simple_rnn_model.keras")
     scaler = joblib.load("scaler.save")
     with open("metrics.json", "r") as f:
         metrics = json.load(f)

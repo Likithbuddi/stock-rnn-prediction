@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import os
 import numpy as np
@@ -13,9 +14,10 @@ st.set_page_config(page_title="Stock Predictor | Trained SimpleRNN", layout="wid
 
 st.title("📈 Next‑Day Close Price Predictor")
 st.markdown(
-    "This dashboard uses a **pre‑trained SimpleRNN** (50 epochs) and its saved scaler "
+    "This dashboard uses a **pre‑trained SimpleRNN** and its saved scaler "
     "to predict the next trading day's closing price. No retraining happens here – "
-    "the model weights from `simple_rnn_model.keras` are loaded and reused."
+    "the best model weights (selected by lowest test MSE) from `simple_rnn_model.keras` "
+    "are loaded and reused."
 )
 
 # -------------------------------------------------------------------------#
@@ -41,8 +43,9 @@ def load_data(ticker, start, end):
     return df[["Close"]].reset_index()
 
 
-DATA_START = "2015-01-01"
-DATA_END = "2024-12-31"
+DATA_START = metrics["start_date"]
+# yfinance treats `end` as exclusive, so add one day to include the last trained date.
+DATA_END = (dt.date.fromisoformat(metrics["end_date"]) + dt.timedelta(days=1)).isoformat()
 df = load_data(metrics["ticker"], DATA_START, DATA_END)
 
 LOOK_BACK = metrics["look_back"]
@@ -69,7 +72,7 @@ predict_btn = st.sidebar.button("Predict Next Day")
 # -------------------------------------------------------------------------#
 #  Main dashboard – training metrics
 # -------------------------------------------------------------------------#
-st.subheader("Model Performance (from 50‑epoch training)")
+st.subheader(f"Model Performance ({metrics['epochs']}-epoch tuned training)")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Train RMSE", f"{metrics['train_rmse']:.4f}")
 c2.metric("Test  RMSE", f"{metrics['test_rmse']:.4f}")
@@ -81,10 +84,16 @@ col5.metric("Train MSE", f"{metrics['train_mse']:.4f}")
 col6.metric("Test  MSE", f"{metrics['test_mse']:.4f}")
 
 st.caption(
+    f"Data window: {metrics['start_date']} -> {metrics['end_date']} | "
     f"Keras final scaled loss (MSE): {metrics['keras_final_loss']:.6f} | "
     f"Validation loss: {metrics['keras_final_val_loss']:.6f} | "
     f"Epochs: {metrics['epochs']} | Look‑back: {LOOK_BACK}"
 )
+
+plot_path = "actual_vs_predicted.png"
+if os.path.exists(plot_path):
+    st.subheader("Actual vs Predicted (Held‑Out Test Set)")
+    st.image(plot_path, use_container_width=True)
 
 # -------------------------------------------------------------------------#
 #  Prediction logic using saved weights
@@ -119,12 +128,15 @@ if predict_btn:
             fig, ax = plt.subplots(figsize=(10, 5))
             recent = sub.tail(60)
             ax.plot(pd.to_datetime(recent["Date"]), recent["Close"], label="Historical Close", color="steelblue")
-            next_date = pd.Timestamp(ref_date) + pd.Timedelta(days=1)
-            ax.scatter([next_date], [pred_price], color="crimson", s=80,
+            if not next_rows.empty:
+                pred_date = pd.to_datetime(next_rows.iloc[0]["Date"])
+            else:
+                pred_date = pd.Timestamp(ref_date) + pd.Timedelta(days=1)
+            ax.scatter([pred_date], [pred_price], color="crimson", s=80,
                        label=f"Predicted ${pred_price:.2f}", zorder=5)
             if not next_rows.empty:
-                ax.scatter([pd.to_datetime(next_rows.iloc[0]["Date"])], [actual_next],
-                           color="green", s=80, label=f"Actual ${actual_next:.2f}", zorder=5)
+                ax.scatter([pred_date], [actual_next], color="green", s=80,
+                           label=f"Actual ${actual_next:.2f}", zorder=5)
             ax.set_title(f"{metrics['ticker']} – Next‑Day Prediction using Saved SimpleRNN Weights")
             ax.set_xlabel("Date")
             ax.set_ylabel("Close Price (USD)")
